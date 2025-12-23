@@ -1,0 +1,336 @@
+﻿@using Microsoft.JSInterop
+@inject IJSRuntime JS
+
+@if (UseSvg == true)
+{
+    <svg id="@SvgId"
+         xmlns:xlink="http://www.w3.org/1999/xlink"
+         width="@SvgWidthAttr"
+         height="@(SvgHeightAttr)"
+         class="@SvgClass"
+         style="@SvgStyle"
+         overflow="visible"
+         preserveAspectRatio="@PreserveAspectRatio">
+        @* 항상 <image> 를 렌더하되 opacity로 보이기 제어 *@
+        @if (!string.IsNullOrEmpty(Src))
+        {
+            <image @ref="imgElement"
+                   id="@Id"
+                   href="@Src"
+                   xlink:href="@Src"
+                   x="@DrawX"
+                   y="@(DrawY)"
+                   width="@DrawWidthAttr"
+                   height="@(DrawHeightAttr)"
+                   preserveAspectRatio="@PreserveAspectRatio"
+                   transform="@TransformAttr"
+                   class="@Class"
+                   style="@CombinedImageStyle" />
+        }
+        else if (_showPlaceholder)
+        {
+            <rect x="@((X ?? 0))" y="@((Y ?? 0))" width="@((PlaceholderWidth))" height="@((PlaceholderHeight))" fill="transparent" />
+        }
+    </svg>
+}
+else
+{
+    @* HTML <img>도 항상 렌더(단, Src 없으면 placeholder) *@
+    @if (!string.IsNullOrEmpty(Src))
+    {
+        <image @ref="imgElement"
+               id="@Id"
+               href="@Src"
+               xlink:href="@Src"
+               x="@DrawX"
+               y="@(DrawY)"
+               width="@DrawWidthAttr"
+               height="@(DrawHeightAttr)"
+               preserveAspectRatio="@PreserveAspectRatio"
+               transform="@TransformAttr"
+               class="@Class"
+               style="@CombinedImageStyle" />
+    }
+    else if (_showPlaceholder)
+    {
+        <div style="width:@(PlaceholderWidth)px;height:@(PlaceholderHeight)px;visibility:hidden"></div>
+    }
+}
+
+@code {
+    // Parameters
+    [Parameter] public string Id { get; set; }
+    [Parameter] public string Src { get; set; }
+
+    [Parameter] public double? X { get; set; } = 0;
+    [Parameter] public double? Y { get; set; } = 0;
+    [Parameter] public double? Width { get; set; } = null;
+    [Parameter] public double? Height { get; set; } = null;
+
+    [Parameter] public double Rotation { get; set; } = 0;
+    [Parameter] public string Anchor { get; set; } = "center";
+
+    [Parameter] public string SvgId { get; set; }
+    [Parameter] public double? SvgWidth { get; set; }
+    [Parameter] public double? SvgHeight { get; set; }
+    [Parameter] public string ViewBox { get; set; } = null;
+    [Parameter] public string SvgClass { get; set; }
+    [Parameter] public string SvgStyle { get; set; }
+    [Parameter] public string PreserveAspectRatio { get; set; } = "xMidYMid meet";
+    [Parameter] public bool? UseSvg { get; set; } = false;
+
+    [Parameter] public string Class { get; set; }
+    [Parameter] public string Style { get; set; }
+
+    ElementReference imgElement;
+    double naturalW = 0, naturalH = 0;
+
+    private bool _imageReady = false;
+    private bool _showPlaceholder = true;
+
+    // race 방지
+    private int _imageLoadRequestId = 0;
+
+    // preload trigger
+    private bool _needsPreload = false;
+    private string _lastSrc = null;
+
+    // JS DTO
+    public class DomSize { public double Width { get; set; } public double Height { get; set; } public bool cached { get; set; } public string status { get; set; } }
+
+    protected override Task OnParametersSetAsync()
+    {
+        // explicit size 있으면 곧바로 준비로 간주
+        _imageReady = (Width.HasValue && Width.Value > 0) && (Height.HasValue && Height.Value > 0);
+        _showPlaceholder = !_imageReady;
+
+        // Src 변경 감지: 새 src가 들어오면 프리로드 필요 표시
+        if (!string.Equals(_lastSrc, Src, StringComparison.Ordinal))
+        {
+            _lastSrc = Src;
+            _needsPreload = !string.IsNullOrEmpty(Src) && !_imageReady;
+            if (_needsPreload)
+            {
+                naturalW = 0;
+                naturalH = 0;
+            }
+        }
+
+        return base.OnParametersSetAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        await base.OnAfterRenderAsync(firstRender);
+
+        if (!_needsPreload || string.IsNullOrEmpty(Src))
+            return;
+
+        _imageLoadRequestId++;
+        var currentRequest = _imageLoadRequestId;
+
+        try
+        {
+            // 안전 체크: svgUtils.preload 함수를 사용할 수 있는지 확인
+            bool helperExists = false;
+            try
+            {
+                helperExists = await JS.InvokeAsync<bool>("eval", "typeof window.svgUtils !== 'undefined' && typeof window.svgUtils.getCachedInfo === 'function' && typeof window.svgUtils.preloadAndGetNaturalSize === 'function'");
+            }
+            catch
+            {
+                helperExists = false;
+            }
+
+            if (!helperExists)
+            {
+                // JS helper 없으면 폴백: 바로 보여주기
+                _imageReady = true;
+                _showPlaceholder = false;
+                _needsPreload = false;
+                await InvokeAsync(StateHasChanged);
+                return;
+            }
+
+            // 1) 캐시 정보 확인
+            DomSize cached = null;
+            try
+            {
+                cached = await JS.InvokeAsync<DomSize>("svgUtils.getCachedInfo", Src);
+            }
+            catch
+            {
+                cached = null;
+            }
+
+            if (currentRequest != _imageLoadRequestId) return;
+
+            if (cached != null && cached.cached && cached.Width > 0 && cached.Height > 0)
+            {
+                naturalW = cached.Width;
+                naturalH = cached.Height;
+                _imageReady = true;
+                _showPlaceholder = false;
+                _needsPreload = false;
+                await InvokeAsync(StateHasChanged);
+                return;
+            }
+
+            // 2) 캐시에 없거나 pending인 경우 preload를 기다리되 타임아웃 적용
+            DomSize size = null;
+            try
+            {
+                var preloadTask = JS.InvokeAsync<DomSize>("svgUtils.preloadAndGetNaturalSize", Src).AsTask();
+                var timeoutTask = Task.Delay(3000); // 3s timeout
+                var finished = await Task.WhenAny(preloadTask, timeoutTask);
+
+                if (finished == preloadTask)
+                {
+                    size = await preloadTask; // result
+                }
+                else
+                {
+                    // 타임아웃: 폴백 (이미지 DOM은 이미 렌더되므로 브라우저가 로드 시도)
+                    size = null;
+                }
+            }
+            catch
+            {
+                size = null;
+            }
+
+            if (currentRequest != _imageLoadRequestId) return;
+
+            if (size != null && size.Width > 0 && size.Height > 0)
+            {
+                naturalW = size.Width;
+                naturalH = size.Height;
+            }
+
+            // 표시 (성공 여부와 상관없이 DOM에 이미지는 있으므로 보이게 설정)
+            _imageReady = true;
+            _showPlaceholder = false;
+            _needsPreload = false;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch
+        {
+            if (currentRequest != _imageLoadRequestId) return;
+            _imageReady = true;
+            _showPlaceholder = false;
+            _needsPreload = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    // Draw size
+    double DrawWidth => ComputeDrawWidth();
+    double DrawHeight => ComputeDrawHeight();
+
+    double ComputeDrawWidth()
+    {
+        if (Width.HasValue && Width.Value != 0) return Width.Value;
+        if (Height.HasValue && Height.Value != 0 && naturalH > 0) return naturalW * (Height.Value / naturalH);
+        return naturalW > 0 ? naturalW : 0;
+    }
+
+    double ComputeDrawHeight()
+    {
+        if (Height.HasValue && Height.Value != 0) return Height.Value;
+        if (Width.HasValue && Width.Value != 0 && naturalW > 0) return naturalH * (Width.Value / naturalW);
+        return naturalH > 0 ? naturalH : 0;
+    }
+
+    string DrawWidthAttr => (double.IsNaN(DrawWidth) || DrawWidth == 0) ? "100%" : DrawWidth.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    string DrawHeightAttr => (double.IsNaN(DrawHeight) || DrawHeight == 0) ? "100%" : DrawHeight.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    string SvgWidthAttr => (SvgWidth.HasValue && SvgWidth.Value > 0) ? SvgWidth.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : null;
+    string SvgHeightAttr => (SvgHeight.HasValue && SvgHeight.Value > 0) ? SvgHeight.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : null;
+
+    double ImageOffsetX => DrawWidth > 0 ? DrawWidth / 2.0 : 0;
+    double ImageOffsetY => DrawHeight > 0 ? DrawHeight / 2.0 : 0;
+
+    double DrawX
+    {
+        get
+        {
+            var baseX = X ?? 0;
+            if (string.Equals(Anchor, "center", StringComparison.OrdinalIgnoreCase)) return baseX - ImageOffsetX;
+            if (string.Equals(Anchor, "topleft", StringComparison.OrdinalIgnoreCase)) return baseX;
+            if (!string.IsNullOrWhiteSpace(Anchor) && Anchor.Contains(","))
+            {
+                var parts = Anchor.Split(',');
+                if (double.TryParse(parts[0], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var ax)) return ax - ImageOffsetX;
+                return baseX - ImageOffsetX;
+            }
+            return baseX;
+        }
+    }
+
+    double DrawY
+    {
+        get
+        {
+            var baseY = Y ?? 0;
+            if (string.Equals(Anchor, "center", StringComparison.OrdinalIgnoreCase)) return baseY - ImageOffsetY;
+            if (string.Equals(Anchor, "topleft", StringComparison.OrdinalIgnoreCase)) return baseY;
+            if (!string.IsNullOrWhiteSpace(Anchor) && Anchor.Contains(","))
+            {
+                var parts = Anchor.Split(',');
+                if (parts.Length > 1 && double.TryParse(parts[1], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var ay)) return ay - ImageOffsetY;
+                return baseY - ImageOffsetY;
+            }
+            return baseY;
+        }
+    }
+
+    string TransformAttr
+    {
+        get
+        {
+            if (Rotation == 0) return null;
+            double cx = 0, cy = 0;
+            if (string.Equals(Anchor, "center", StringComparison.OrdinalIgnoreCase)) { cx = X ?? 0; cy = Y ?? 0; }
+            else if (string.Equals(Anchor, "topleft", StringComparison.OrdinalIgnoreCase)) { cx = (X ?? 0) + ImageOffsetX; cy = (Y ?? 0) + ImageOffsetY; }
+            else if (!string.IsNullOrWhiteSpace(Anchor) && Anchor.Contains(","))
+            {
+                var parts = Anchor.Split(',');
+                if (double.TryParse(parts[0], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var ax)) cx = ax;
+                if (parts.Length > 1 && double.TryParse(parts[1], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var ay)) cy = ay;
+            }
+            else { cx = (X ?? 0) + ImageOffsetX; cy = (Y ?? 0) + ImageOffsetY; }
+
+            var cxStr = cx.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var cyStr = cy.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var rotStr = Rotation.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return $"translate({cxStr} {cyStr}) rotate({rotStr}) translate({(-cx).ToString(System.Globalization.CultureInfo.InvariantCulture)} {(-cy).ToString(System.Globalization.CultureInfo.InvariantCulture)})";
+        }
+    }
+
+    string CombinedImageStyle
+    {
+        get
+        {
+            var baseStyle = Style ?? string.Empty;
+            if (!string.IsNullOrEmpty(baseStyle) && !baseStyle.TrimEnd().EndsWith(";")) baseStyle += ";";
+            // baseStyle += "transition:opacity 0.12s ease-in-out;";
+            // baseStyle += _imageReady ? "opacity:1;" : "opacity:0;";
+            return baseStyle;
+        }
+    }
+
+    string HtmlImageStyle
+    {
+        get
+        {
+            var s = Style ?? string.Empty;
+            if (!string.IsNullOrEmpty(s) && !s.TrimEnd().EndsWith(";")) s += ";";
+            // s += "transition:opacity 0.12s ease-in-out;";
+            // s += _imageReady ? "opacity:1;" : "opacity:0;";
+            return s;
+        }
+    }
+
+    double PlaceholderWidth => (Width.HasValue && Width.Value > 0) ? Width.Value : (naturalW > 0 ? naturalW : 10);
+    double PlaceholderHeight => (Height.HasValue && Height.Value > 0) ? Height.Value : (naturalH > 0 ? naturalH : 10);
+}
