@@ -1,0 +1,773 @@
+﻿@inherits AMRCComponentBase;
+@using System.IO
+@using System.Net
+@using System.Text
+@using System.Collections.Generic
+@using System.Collections.Concurrent
+@using LGCNS.AMRC.Model;
+@using System.Threading;
+@using LGCNS.AMRC.WEBUI.Pages.Dialog
+@using LGCNS.AMRC.WEBUI.Pages.Control;
+@using LGCNS.AMRC.WEBUI.Pages.Simple;
+@using LGCNS.ezControl.Core;
+
+
+
+@*@using LGCNS.ezControl.Core*@
+
+@inject IJSRuntime JS
+
+@inject NavigationManager NavigationManager
+@inject IHttpContextAccessor HttpContextAccessor
+@using Microsoft.AspNetCore.Http;
+@using System.Reflection
+
+
+<div class="playbackMain" id="playbackMain" @onkeydown="SliderKeyDown" tabindex="0">
+
+    @if (IsSimple)
+    {
+        <header class="position-sticky">
+            <SimpleHeaderAmrc mode=@eMapDisplayMode.PlayBack dataManager="dataManager" />
+        </header>
+    }
+    else
+    {
+        <div class="header">
+            <TopAGVCStatusComponent @ref="topAGVCStatusComponent" mode=@eMapDisplayMode.PlayBack dataManager="dataManager" />
+        </div>
+    }
+
+    <div class="contents">
+        @CustomRender1
+    </div>
+   
+    <div class="dateSelect">
+        <div class="searchInput">
+            <div style="float: left; line-height: 30px; font-size: 14px;">
+                Date:
+            </div>
+            <div style="float: left; padding-left: 10px;">
+                <HxInputDate CalendarIcon="BootstrapIcon.Calendar"
+                             @bind-Value="playbackDate"
+                             style="font-size: 14px;" />
+            </div>
+            <div style="float: left; line-height: 30px; padding-left: 8px; font-size: 14px;">
+                Hour:
+            </div>
+            <div style="float: left; padding-left: 10px;">
+                <!--bind-Value="selectHour"-->
+                <HxSelect TItem="Hours"
+                          TValue="int"
+                          Data="hours"
+                          Nullable="false"
+                          TextSelector="@(p => p.hour.ToString())"
+                          ValueSelector="@(p => p.hourValue)"
+                          SortKeySelector="@(p => p.hour)"
+                          @bind-Value="selectHour" style="font-size: 14px;"
+                          @onkeydown:stopPropagation />
+            </div>
+            <div style="float: left; padding: 0 10px 0 10px; height: 30px; line-height: 30px;">
+                <HxButton Color="ThemeColor.Secondary" @onclick="() => LoadPlaybackLog()" style="z-index:99; font-size: 13px;">
+                    LOAD
+                </HxButton>
+            </div>
+        </div>
+        <div id="slider" class="slider">
+            <TimeSlider @ref="timeSliderComponent" ValueChanged="SliderChanged" />
+        </div>
+
+        <!--bind-Value="selectSpan"-->
+        @*
+    <HxSelect TItem="Span"
+    TValue="int"
+    Data="span"
+    Nullable="false"
+    TextSelector="@(p => p.hour.ToString())"
+    ValueSelector="@(p => p.hourValue)"
+    SortKeySelector="@(p => p.hour)"
+    @bind-Value="selectSpan" />
+    *@
+    </div>
+</div>
+
+<FileSelector FolderPath="@OnlyPlaybackFolderPath" SelectResult="FileSelectResult" FileFilterMode="1" @ref="fileSelectorRef" Title="Time Select" />
+
+@code {
+    [Parameter]
+    public Index index { get; set; }
+
+    FileSelector fileSelectorRef;
+    private string OnlyPlaybackFolderPath = Path.Combine(Path.GetDirectoryName(AppDomain.CurrentDomain.BaseDirectory), "PlayBack");
+
+    [Parameter]
+    public eMapDisplayMode mode
+    {
+        get;
+        set;
+    }
+
+    private int animationId = 0;
+
+    public enum pbDataType
+    {
+        map,
+        mapPos,
+        status,
+        statusPos
+    }
+
+    public bool IsSimple
+    {
+        get
+        {
+            return NavigationManager.Uri.Contains("Simple");
+        }
+    }
+
+    string drawControl = "NoData";
+    //Type selectedType = typeof(HxButton);
+
+    RenderFragment AddTimeSlider() => builder =>
+    {
+        //builder.AddContent(1, timeSliderComponent);
+
+        builder.OpenComponent(0, typeof(TimeSlider));
+        builder.AddAttribute(1, "MaxValue", sliderRange.TotalSeconds);
+        builder.AddAttribute(2, "Value", (double)value);
+        //builder.AddAttribute(3, "leftClickEvent", onClick.InvokeAsync("LeftClicked"));
+        builder.CloseComponent();
+    };
+
+    RenderFragment AddMapControl() => builder =>
+    {
+        builder.OpenComponent(0, typeof(MapControl));
+        builder.AddAttribute(1, "mode", eMapDisplayMode.PlayBack);
+        builder.AddAttribute(2, "playBack", this);
+        builder.AddAttribute(3, "dataManager", dataManager);
+
+        builder.AddComponentReferenceCapture(4, (__value) =>
+        {
+            mapControl = (MapControl)__value;
+        });
+
+        builder.CloseComponent();
+    };
+
+    RenderFragment AddLabelControl(string label) => builder =>
+    {
+        builder.OpenComponent(0, typeof(MessageLabel));
+        builder.AddAttribute(1, "LabelText", label);
+        builder.CloseComponent();
+    };
+
+    RenderFragment AddLoadingControl() => builder =>
+    {
+        builder.OpenComponent(0, typeof(Loading));
+        builder.CloseComponent();
+    };
+
+    private RenderFragment? CustomRender1 { get; set; }
+    private RenderFragment? CustomRender2 { get; set; }
+
+    EventCallback onClick { get; set; }
+
+    TopAGVCStatusComponent _topAGVCStatusComponent;
+    TopAGVCStatusComponent topAGVCStatusComponent
+    {
+        get
+        {
+            return _topAGVCStatusComponent;
+        }
+        set
+        {
+            _topAGVCStatusComponent = value;
+        }
+    }
+
+    AlarmComponent _alarmComponent;
+    AlarmComponent alarmComponent
+    {
+        get
+        {
+            return _alarmComponent;
+        }
+        set
+        {
+            _alarmComponent = value;
+        }
+    }
+
+    MapControl _mapControl;
+    public MapControl mapControl
+    {
+        get
+        {
+            return _mapControl;
+        }
+        set
+        {
+            _mapControl = value;
+            if (IsSimple) return;
+            topAGVCStatusComponent.Instance = value;
+            //alarmComponent.mapControl = value;
+        }
+    }
+
+    TimeSlider timeSliderComponent;
+
+    private int value = 0;
+    JavaScriptCall jsCall = null;
+
+    private TimeSpan sliderRange
+    {
+        get;
+        set;
+    }
+
+    DateTime _playbackDate = DateTime.MinValue;
+    private DateTime playbackDate
+    {
+        get
+        {
+            return _playbackDate;
+        }
+        set
+        {
+            _playbackDate = value;
+        }
+    }
+
+    private int selectHour { get; set; }
+
+    int _selectSpan;
+    private int selectSpan
+    {
+        get
+        {
+            if (span.Count > 0 && span.Find(x => x.hourValue == _selectSpan) is null)
+            {
+                _selectSpan = selectHour;
+            }
+
+            return _selectSpan;
+        }
+        set
+        {
+            _selectSpan = value;
+        }
+    }
+
+    class positionData
+    {
+        public long start = 0;
+        public long end = 0;
+
+        public positionData(long start, long end)
+        {
+            this.start = start;
+            this.end = end;
+        }
+    }
+
+    Dictionary<pbDataType, SortedDictionary<DateTime, positionData>> timeLineData = null;
+    // public WebCommunicationData mapTimeLineData = new WebCommunicationData();
+
+    record Hours(int hour, int hourValue);
+    List<Hours> hours = new List<Hours>();
+
+    record Span(int hour, int hourValue);
+    List<Span> span = new List<Span>();
+
+    //
+    Dictionary<pbDataType, byte[]> pbData = new Dictionary<pbDataType, byte[]>();
+    string oldTime = string.Empty;
+
+    DateTime oldMapTime = DateTime.MinValue;
+    DateTime oldDateTime = DateTime.MinValue;
+    positionData oldMapPosition = null;
+
+    //AGV.PlayBack.TimeLineWriter.NamedPipeServer namedPipeServer = null;
+
+    private DotNetObjectReference<PlayBackComponent> _objRef;
+
+    // 달력 초기화 작업.
+    protected void InitCalendar()
+    {
+        this.playbackDate = new DateTime(DateTime.Now.Year, DateTime.Now.Month, DateTime.Now.Day);
+    }
+
+    protected override void OnInitialized()
+    {
+        dataManager = new DataManager(eMapDisplayMode.PlayBack);
+
+        if (!IsSimple)
+        {
+            index.mainLayout.bottomLogListComponentRef.dataManager = dataManager;
+            index.mainLayout.bottomAlarmListComponentRef.dataManager = dataManager;
+        }
+
+        jsCall = new JavaScriptCall(JS);
+
+        foreach (pbDataType item in Enum.GetValues(typeof(pbDataType)))
+        {
+            pbData[item] = null;
+        }
+
+        // 시작 시작 설정.
+        for (int i = 0; i <= 24; i++)
+        {
+            Hours a = new Hours(i, i);
+            hours.Add(a);
+        }
+        selectHour = DateTime.Now.Hour;
+
+        InitCalendar();
+
+        base.OnInitialized();
+    }
+
+    private async void Redraw()
+    {
+        await InvokeAsync(StateHasChanged);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+
+        }
+        else
+        {
+
+        }
+    }
+
+    private async void LoadPlaybackLog()
+    {
+        if (Program.IsOnlyPlayback)
+            await fileSelectorRef.Active(new EventCallback<string>(this, FileSelectResult));
+        else
+            Load();
+    }
+
+    // 시간 선택 변경.
+    private async void Load()
+    {
+        await timeSliderComponent.Disable();
+
+        await LoadPlayBackData();
+
+        if (pbData[pbDataType.mapPos] is not null && pbData[pbDataType.statusPos] is not null)
+        {
+            this.ProcessTimeLine(new TimeSpan());
+
+            //timeSliderComponent.Enabled();
+
+            timeSliderComponent.MaxValue = 3600; // 1시간 단위로 지정. sliderRange.TotalSeconds;
+            timeSliderComponent.Value = 0;
+
+            DateTime posDateTime = this.playbackDate.AddHours(selectHour);
+            timeSliderComponent.SetTime = posDateTime;
+
+            await timeSliderComponent.Enable();
+            timeSliderComponent.Value = 0f;
+            timeSliderComponent.Redraw(true);
+        }
+        else
+        {
+            CustomRender1 = AddLabelControl("No PlayBack Data");
+
+            Redraw();
+            timeSliderComponent.Redraw();
+        }
+    }
+
+    private async Task LoadPlayBackData()
+    {
+        // 사용자가 Playback 하기 위한 설정한 값에 따른 가져올 파일 이름 설정.
+        string mapFileName = GetDownLoadDataFileName(true, false);
+        string mapPositionFileName = GetDownLoadDataFileName(true, true);
+
+        // map data parse.
+        //pbData[pbDataType.mapPos] = await jsCall.DownloadPlayBackFile(mapPositionFileName);
+        pbData[pbDataType.mapPos] = await jsCall.ReadFileData(mapPositionFileName);
+        if (pbData[pbDataType.mapPos] is not null)
+        {
+            await ParseTimeLine(pbData, pbDataType.mapPos);
+            //pbData[pbDataType.map] = await jsCall.DownloadPlayBackFile(mapFileName);
+            pbData[pbDataType.map] = await jsCall.ReadFileData(mapFileName);
+        }
+
+        //////
+        string statusFileName = GetDownLoadDataFileName(false, false);
+        string statusPositionFileName = GetDownLoadDataFileName(false, true);
+
+        // status data parse.
+        //pbData[pbDataType.statusPos] = await jsCall.DownloadPlayBackFile(statusPositionFileName);
+        pbData[pbDataType.statusPos] = await jsCall.ReadFileData(statusPositionFileName);
+
+        if (pbData[pbDataType.statusPos] is not null)
+        {
+            await ParseTimeLine(pbData, pbDataType.statusPos);
+            //pbData[pbDataType.status] = await jsCall.DownloadPlayBackFile(statusFileName);
+            pbData[pbDataType.status] = await jsCall.ReadFileData(statusFileName);
+        }
+    }
+
+    public async Task ParseTimeLine(Dictionary<pbDataType, byte[]> data, pbDataType dataType)
+    {
+        if (data is not null)
+        {
+            timeLineData = timeLineData ?? new Dictionary<pbDataType, SortedDictionary<DateTime, positionData>>();
+
+            timeLineData[dataType] = new SortedDictionary<DateTime, positionData>();
+
+            //
+            DateTime startTime = DateTime.MaxValue;
+            DateTime lastTime = DateTime.MinValue;
+            int oldi = 0;
+
+            byte[] buffer = data[dataType];
+
+            for (int i = 0; i < buffer.Length; i++)
+            {
+                if (buffer[i] == '\n')
+                {
+                    int len = (i - oldi) - 1;
+
+                    byte[] linedata = new byte[len];
+                    Array.Copy(buffer, oldi, linedata, 0, len);
+
+                    string str = Encoding.UTF8.GetString(linedata);
+                    str = str.Trim();
+                    str = str.Replace("\r\n", "");
+
+                    string[] sarray = str.Split('_');
+                    string[] range = sarray[1].Split(',');
+
+                    DateTime time = DateTime.ParseExact(sarray[0], "yyyy-MM-dd HH:mm:ss", null);
+
+                    timeLineData[dataType].TryAdd(time, new positionData(long.Parse(range[0]), long.Parse(range[1])));
+
+                    if (time < startTime)
+                        startTime = time;
+                    if (time > lastTime)
+                        lastTime = time;
+
+                    oldi = i + 1;
+                }
+            }
+
+            if (dataType == pbDataType.statusPos && timeLineData[dataType].Count > 0)
+            {
+                //TimeSpan span = lastTime - startTime;
+                //this.sliderRange = span;
+            }
+        }
+    }
+
+    private string GetDownLoadDataFileName(bool isMapType, bool isPosition)
+    {
+        // http://10.65.58.28:40639/TimeLine/2022-11-18-12_status_playback.log
+
+        string fileName = string.Empty;
+
+        fileName = isMapType ? "map_playback" : "status_playback";
+        fileName += isPosition ? "_position" : string.Empty;
+        fileName += ".log";
+
+        string selectDate = playbackDate.ToString("yyyy-MM-dd") + "-" + string.Format("{0:00}", selectHour) + "_" + fileName;
+        string downloadUrl = string.Empty;
+
+        if (!Program.IsOnlyPlayback)
+            downloadUrl = Path.Combine(DataManager.Instance.webModule.LOG_PATH, DataManager.Instance.optionModel.Program_Argument, "PlayBack", selectDate);
+        else
+            downloadUrl = Path.Combine(OnlyPlaybackFolderPath, selectDate);
+
+        return downloadUrl;
+    }
+
+    bool isTimeLineProcess = false;
+
+    private async Task ProcessTimeLine(TimeSpan sTime)
+    {
+        if (timeLineData is null)
+            return;
+
+        if (timeLineData[pbDataType.mapPos] is null || timeLineData[pbDataType.statusPos] is null)
+            return;
+
+        if (isTimeLineProcess)
+            return;
+
+        isTimeLineProcess = true;
+
+        DateTime posDateTime = this.playbackDate.AddHours(selectHour);
+        posDateTime += sTime;
+
+        TimeSpan diffTime = oldDateTime - posDateTime;
+
+        var statusItem = timeLineData[pbDataType.statusPos].Keys.FirstOrDefault(x => x >= posDateTime);
+        var mapItem = timeLineData[pbDataType.mapPos].Keys.LastOrDefault(x => x <= statusItem);
+
+        if (mapItem == default(DateTime) || statusItem == default(DateTime))
+        {
+            isTimeLineProcess = false;
+            return;
+        }
+
+
+        #region Map
+        positionData mapPos = timeLineData[pbDataType.mapPos][mapItem];
+
+        if (!mapPos.Equals(oldMapPosition))
+        {
+            byte[] mapLineData = new byte[mapPos.end - mapPos.start];
+            Array.Copy(pbData[pbDataType.map], mapPos.start, mapLineData, 0, mapPos.end - mapPos.start);
+
+            dataManager.DeserializeData(mapLineData, playBackMode.isCompress, true);
+
+            CustomRender1 = AddMapControl();
+            Redraw();
+
+            this.oldMapTime = posDateTime;
+            this.oldMapPosition = mapPos;
+
+            // map change 된 경우. status 까지 반영.
+            if (!timeLineData[pbDataType.statusPos].ContainsKey(posDateTime))
+            {
+                var statusItem2 = timeLineData[pbDataType.statusPos].Where(x => x.Key >= posDateTime);
+
+                if (statusItem2 != null && statusItem2.Count() > 0)
+                {
+                    statusItem2 = statusItem2.OrderByDescending(x => x.Key);
+
+                    if ((posDateTime - statusItem2.First().Key).TotalSeconds <= 3)
+                    {
+                        statusItem2 = statusItem2.OrderByDescending(x => x.Key);
+                        positionData statusPos = statusItem2.First().Value;
+
+                        // Status 표시하기.
+                        byte[] statusLineData = new byte[statusPos.end - statusPos.start];
+                        Array.Copy(pbData[pbDataType.status], statusPos.start, statusLineData, 0, statusPos.end - statusPos.start);
+
+                        dataManager.DeserializeData(statusLineData, playBackMode.isCompress, true);
+                    }
+                }
+            }
+        }
+
+        #endregion Map
+
+        #region Status
+        // 정확한 시간이 있을 때에만 Update
+        if (timeLineData[pbDataType.statusPos].ContainsKey(posDateTime))
+        {
+            positionData statusPos = timeLineData[pbDataType.statusPos][posDateTime];
+
+            // Status 표시하기.
+            byte[] statusLineData = new byte[statusPos.end - statusPos.start];
+            Array.Copy(pbData[pbDataType.status], statusPos.start, statusLineData, 0, statusPos.end - statusPos.start);
+
+            dataManager.DeserializeData(statusLineData, playBackMode.isCompress, true);
+        }
+        else
+        {
+         
+        }
+        #endregion Status
+
+        oldDateTime = posDateTime;
+        isTimeLineProcess = false;
+    }
+
+    private async Task SliderChanged(TimeSpan sTime)
+    {
+        if (timeSliderComponent.isDisabled)
+            return;
+
+        ProcessTimeLine(sTime);
+    }
+
+    public async Task Pause()
+    {
+        if (timeSliderComponent is not null)
+            await timeSliderComponent.Pause();
+    }
+    @*
+
+
+    //////////////
+
+    public async Task Active()
+    {
+        if (mapControl is not null)
+            await mapControl.Active();
+    }
+    *@
+    public async Task Close()
+    {
+        if (mapControl is not null)
+            await mapControl.Close();
+    }
+
+    EventCallback<DateTime> _DateChange = new EventCallback<DateTime>();
+    EventCallback<DateTime> DateChange
+    {
+        get
+        {
+            return _DateChange;
+        }
+        set
+        {
+            _DateChange = value;
+        }
+    }
+
+    void DateExpr()
+    {
+    }
+
+    [JSInvokable]
+    public override async ValueTask DisposeAsync()
+    {
+        base.DisposeAsync();
+
+        CustomRender1 = null;
+
+        pbData[pbDataType.map] = null;
+        pbData[pbDataType.mapPos] = null;
+        pbData[pbDataType.status] = null;
+        pbData[pbDataType.statusPos] = null;
+
+        mapControl = null;
+
+        _objRef?.Dispose();
+    }
+
+
+    private string selectedMenu = "홈";
+
+    // 자식 컴포넌트에서 전달된 메뉴 선택 이벤트 처리
+    private void HandleMenuClick(string menu)
+    {
+        selectedMenu = menu;
+        Console.WriteLine("메뉴는11 " + menu);
+
+        HandleMenuClickBottom(menu);
+    }
+
+
+    [Parameter]
+    public EventCallback<string> OnMenuClickBottom { get; set; }
+
+    // 메뉴 항목 클릭 시 부모에게 이벤트 전달
+    private async Task HandleMenuClickBottom(string menu)
+    {
+        await OnMenuClickBottom.InvokeAsync(menu);
+    }
+
+    bool isTimeSliderRunning = false;
+    private void SliderKeyDown(KeyboardEventArgs args)
+    {
+        if (isTimeSliderRunning)
+            return;
+
+        isTimeSliderRunning = true;
+
+        try
+        {
+            if (args.Key == "ArrowRight")
+                timeSliderComponent.RightClicked(999);
+            else if (args.Key == "ArrowLeft")
+                timeSliderComponent.LeftClicked(999);
+        }
+        catch (Exception ex)
+        {
+
+        }
+        finally
+        {
+            isTimeSliderRunning = false;
+        }
+    }
+
+    public async Task LoadPlayBackFiles(string filename)
+    {
+        string directory = OnlyPlaybackFolderPath;
+
+        if (!filename.Contains("map_playback.log") && !filename.Contains("map_playback_position.log") && !filename.Contains("status_playback.log") && !filename.Contains("status_playback_position.log"))
+        {
+            await ShowMessageBox("No File", "Wrong File Name");
+            return;
+        }
+
+        // directory 경로에 filename 존재여부 확인
+        if (!File.Exists(Path.Combine(directory, filename)))
+        {
+            await ShowMessageBox("No File", "Wrong File Path. Move Log File to PlayBack Folder");
+            return;
+        }
+
+        DateTime dateTime;
+        int hour;
+
+        // 파일 이름에서 날짜와 시간을 추출
+        var times = filename.Split('_')[0].Split('-').ToList();
+        dateTime = new DateTime(int.Parse(times[0]), int.Parse(times[1]), int.Parse(times[2]), 0, 0, 0);
+        hour = int.Parse(times[3]);
+
+        string filename1 = filename.Split('_')[0] + "_" + "map_playback.log";
+        string filename2 = filename.Split('_')[0] + "_" + "map_playback_position.log";
+        string filename3 = filename.Split('_')[0] + "_" + "status_playback.log";
+        string filename4 = filename.Split('_')[0] + "_" + "status_playback_position.log";
+
+        // 모든 Log File 있는 지 확인
+        if (!File.Exists(Path.Combine(directory, filename1)))
+        {
+            await ShowMessageBox("No File", "map_playback.log Not Exist");
+            return;
+        }
+        if (!File.Exists(Path.Combine(directory, filename2)))
+        {
+            await ShowMessageBox("No File", "map_playback_position.log Not Exist");
+            return;
+        }
+        if (!File.Exists(Path.Combine(directory, filename3)))
+        {
+            await ShowMessageBox("No File", "status_playback.log Not Exist");
+            return;
+        }
+        if (!File.Exists(Path.Combine(directory, filename4)))
+        {
+            await ShowMessageBox("No File", "status_playback_position.log Not Exist");
+            return;
+        }
+
+        playbackDate = dateTime;
+        selectHour = hour;
+
+        Load();
+    }
+
+    [Inject] protected IHxMessageBoxService MessageBox { get; set; }
+    private async Task ShowMessageBox(string title, string message)
+    {
+        await InvokeAsync(() =>
+        {
+            MessageBox.ShowAsync(title, message, MessageBoxButtons.Ok);
+        });
+    }
+
+
+
+    public void FileSelectResult(string result)
+    {
+        if (string.IsNullOrEmpty(result))
+            return;
+
+        LoadPlayBackFiles(result);
+    }
+}
